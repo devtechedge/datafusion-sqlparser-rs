@@ -16091,6 +16091,68 @@ fn test_keywords_as_column_names_after_dot() {
 }
 
 #[test]
+fn test_qualified_keyword_function_calls() {
+    let pg = TestedDialects::new(vec![Box::new(PostgreSqlDialect {})]);
+
+    for (qualifier, func) in [
+        ("public", "floor"),
+        ("pg_catalog", "floor"),
+        ("pg_catalog", "ceil"),
+    ] {
+        let sql = format!("SELECT {qualifier}.{func}(3)");
+        match expr_from_projection(&pg.verified_only_select(&sql).projection[0]) {
+            Expr::Function(Function {
+                name,
+                args: FunctionArguments::List(FunctionArgumentList { args, .. }),
+                ..
+            }) => {
+                assert_eq!(
+                    name,
+                    &ObjectName::from(vec![Ident::new(qualifier), Ident::new(func)])
+                );
+                assert_eq!(
+                    args,
+                    &[FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::value(
+                        number("3")
+                    )))]
+                );
+            }
+            other => panic!("Expected a qualified function call, got: {other:?}"),
+        }
+    }
+
+    // EXTRACT has its own `EXTRACT(field FROM source)` grammar; schema-qualified
+    // it is an ordinary function call like any other qualified name.
+    match expr_from_projection(
+        &pg.verified_only_select("SELECT pg_catalog.extract(3)")
+            .projection[0],
+    ) {
+        Expr::Function(Function { name, .. }) => assert_eq!(
+            name,
+            &ObjectName::from(vec![Ident::new("pg_catalog"), Ident::new("extract")])
+        ),
+        other => panic!("Expected a qualified function call, got: {other:?}"),
+    }
+
+    // Unqualified calls still parse as the dedicated FLOOR/CEIL expression.
+    match expr_from_projection(&pg.verified_only_select("SELECT FLOOR(3)").projection[0]) {
+        Expr::Floor { .. } => {}
+        other => panic!("Expected Expr::Floor, got: {other:?}"),
+    }
+
+    // Keyword column identifiers after a dot, without parentheses, are untouched.
+    match expr_from_projection(
+        &pg.verified_only_select("SELECT t.interval FROM tbl t")
+            .projection[0],
+    ) {
+        Expr::CompoundIdentifier(idents) => {
+            assert_eq!(idents, &vec![Ident::new("t"), Ident::new("interval")])
+        }
+        other => panic!("Expected CompoundIdentifier, got: {other:?}"),
+    }
+}
+
+#[test]
 fn parse_create_table_with_bit_types() {
     let sql = "CREATE TABLE t (a BIT, b BIT VARYING, c BIT(42), d BIT VARYING(43))";
     match verified_stmt(sql) {
